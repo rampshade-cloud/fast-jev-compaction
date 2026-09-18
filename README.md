@@ -6,38 +6,181 @@ dropped or truncated, everything kept stays verbatim. Also usable as an npm
 library.
 
 > **This is a fork** of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction).
-> The only change is the section below: Jev can be reached through Vercel AI
-> Gateway, so the plugin works without an invite-only TypeSafe account.
-> Everything else is upstream's.
+> The only change is the section below: Jev can also be reached through **Vercel
+> AI Gateway**, so the plugin works without an invite-only TypeSafe account. That
+> is how this fork runs today. Add a TypeSafe key once you have one and it takes
+> over automatically, with no reinstall; see
+> [Switching to TypeSafe direct](#switching-to-typesafe-direct). Everything else
+> is upstream's.
 
 
 ## Vercel AI Gateway (this fork)
 
-This fork can reach Jev through [Vercel AI Gateway](https://vercel.com/changelog/typesafe-ai-jev-now-available-on-ai-gateway)
-instead of a TypeSafe key, for people without TypeSafe console access.
+Upstream reaches Jev at `api.typesafe.ai`, which needs a TypeSafe account.
+TypeSafe is invite-only at the time of writing, so this fork can send the same
+Jev requests through
+[Vercel AI Gateway](https://vercel.com/changelog/typesafe-ai-jev-now-available-on-ai-gateway),
+where the same model is published as `typesafe-ai/jev`. Nothing else changes:
+the scoring, the pruning and the fallback are upstream's.
 
-Key lookup order (first hit wins): plugin `apiKey` option, `TYPESAFE_API_KEY` (env or
-settings `env`), `~/.config/typesafe/key`, `AI_GATEWAY_API_KEY` (env or settings `env`),
-`~/.config/jev-gateway/key`. A gateway key sends requests to
-`https://ai-gateway.vercel.sh/v4/ai/evaluation-model` with model `typesafe-ai/jev`
-(`jev-latest` and other bare names are mapped onto `typesafe-ai/<name>`); the wire format
-is translated (`noul` ↔ `boolean`) so the library is unchanged.
+**Which provider is in use** is decided by which key is found, in this order.
+The first hit wins:
 
-Install from a local checkout:
+| # | Source | Provider |
+| - | ------ | -------- |
+| 1 | `apiKey` plugin option | TypeSafe direct |
+| 2 | `TYPESAFE_API_KEY` (process env, or settings `env`) | TypeSafe direct |
+| 3 | `~/.config/typesafe/key` | TypeSafe direct |
+| 4 | `AI_GATEWAY_API_KEY` (process env, or settings `env`) | Vercel AI Gateway |
+| 5 | `~/.config/jev-gateway/key` | Vercel AI Gateway |
+
+A TypeSafe key always wins over a gateway key, so you can leave a gateway key in
+place and switch to direct access later by adding a TypeSafe key (see
+[Switching to TypeSafe direct](#switching-to-typesafe-direct)).
+
+### Requirements
+
+- Claude Code **2.1.274 or newer** (function hooks; `claude --version`)
+- Node.js 18 or newer
+- A Vercel account with AI Gateway enabled, **or** a TypeSafe API key
+
+### Install with a Vercel AI Gateway key
+
+**1. Create a gateway API key.** From the AI Gateway section of the Vercel
+dashboard, under API Keys, or with the CLI (a budget is optional but
+recommended):
 
 ```sh
-claude plugin marketplace add /path/to/fast-jev-compaction
+npm i -g vercel@latest
+vercel login
+vercel ai-gateway api-keys create --name jev-mcp --limit 10 --refresh-period monthly
+```
+
+AI Gateway requires a verified card on the team before it serves requests, even
+when free credits cover the usage.
+
+**2. Save the key** where the plugin looks for it:
+
+```sh
+mkdir -p ~/.config/jev-gateway
+printf '%s' "vck_your_key_here" > ~/.config/jev-gateway/key
+chmod 600 ~/.config/jev-gateway/key
+```
+
+`AI_GATEWAY_API_KEY` in the environment or in the settings `env` block works
+just as well; the file avoids exporting a secret into every shell.
+
+**3. Enable function hooks** in `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1"
+  }
+}
+```
+
+**4. Install the plugin** from a local clone:
+
+```sh
+git clone -b gateway-support https://github.com/rampshade-cloud/fast-jev-compaction.git
+claude plugin marketplace add "$PWD/fast-jev-compaction"
 claude plugin install fast-jev-compaction@fast-jev-compaction
 ```
 
-`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` must be set (settings `env` works) and
-Claude Code must be 2.1.274 or newer, as upstream requires.
+Restart Claude Code, or run `/reload-plugins`.
 
-Verified on Claude Code 2.1.276 against a live session: a manual `/compact` of a
-24-message transcript sent one request to the gateway (735 ms) and the hook
-answered `session.compact` with 14 messages, an 88% character reduction, with no
-built-in summary generated. Unit tests for the gateway request and response
-translation are in `tests/gateway.test.ts` and use no network.
+Editing the clone does not change the installed plugin: the install is a copy
+under `~/.claude/plugins/cache/`. After a local edit, refresh it with
+
+```sh
+claude plugin marketplace update fast-jev-compaction
+claude plugin uninstall fast-jev-compaction@fast-jev-compaction
+claude plugin install fast-jev-compaction@fast-jev-compaction
+```
+
+### Verifying
+
+Run `/compact` in a session that has a few tool calls behind it. A toast reports
+the outcome:
+
+- `kept N/M messages, no summary (…)` — Jev's decisions replaced the built-in
+  summary.
+- `fallback to built-in summary (…)` — the reason is in the parentheses; Claude
+  Code's own summary was used instead. Short sessions fall back by design, since
+  the reduction stays under `minReductionRatio`.
+
+`claude --debug-file /tmp/cc.log` records the per-call decisions, the endpoint
+and the request time:
+
+```
+$.http.fetch (fast-jev-compaction): POST https://ai-gateway.vercel.sh/v4/ai/evaluation-model
+$.http.fetch (fast-jev-compaction): 200 in 735ms
+[fast-jev-compaction] decisions: t1:Bash:drop_call/call=0.14/result=0.09 …
+[fast-jev-compaction] kept 14/24 messages, no summary (88% reduction; …)
+```
+
+Verified on Claude Code 2.1.276: a manual `/compact` of a 24-message transcript
+sent one gateway request (735 ms) and the hook answered `session.compact` with
+14 messages and an 88% character reduction, with no summary generated. The unit
+tests for the gateway request and response translation are in
+`tests/gateway.test.ts` and make no network calls.
+
+### Configuration
+
+Every upstream option applies unchanged. Set them interactively with
+`/plugin configure fast-jev-compaction@fast-jev-compaction`, or on install with
+`--config KEY=VALUE`:
+
+| Option | Default | Meaning |
+| ------ | ------: | ------- |
+| `keepThreshold` | `0.5` | Minimum Jev probability for a call or result to stay |
+| `preserveRecentMessages` | `6` | Newest messages never touched |
+| `compactAtPercent` | `60` | Context percentage at which the plugin asks for compaction |
+| `minReductionRatio` | `0.25` | Below this reduction, fall back to the built-in summary |
+| `maxStateTokens` | `25000` | Token budget for the state sent to Jev |
+| `maxRequestTokens` | `30000` | Token budget for state plus questions in one request |
+| `truncateHeadChars` | `300` | Characters kept from a dropped tool result |
+| `model` | `jev-latest` | Jev model name |
+| `apiKey` | unset | TypeSafe key; overrides every other source |
+
+`compactAtPercent` defaults to 60, which is earlier than Claude Code's own
+auto-compaction. Raise it if compaction starts sooner than you want.
+
+`model` takes a TypeSafe model name. On the gateway, a bare name is mapped onto
+its gateway id: `jev-latest` and `jev` both become `typesafe-ai/jev`, and a name
+that already contains a slash is passed through unchanged.
+
+### Switching to TypeSafe direct
+
+Nothing needs to be reinstalled or reconfigured when a TypeSafe account becomes
+available. Write the key where the plugin looks first:
+
+```sh
+mkdir -p ~/.config/typesafe
+printf '%s' "ts_your_key_here" > ~/.config/typesafe/key
+chmod 600 ~/.config/typesafe/key
+```
+
+The next compaction goes to `https://api.typesafe.ai/v1/systemone` with the
+model name as given (`jev-latest` by default), exactly as upstream does. The
+gateway key can stay where it is; it is only consulted when no TypeSafe key is
+found. To go back to the gateway, remove the TypeSafe key (and
+`TYPESAFE_API_KEY`, if it is set).
+
+At that point this fork has no behavioural difference from upstream, so
+[tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
+can be installed instead.
+
+### Troubleshooting
+
+| Symptom | Cause |
+| ------- | ----- |
+| No toast at all on `/compact` | Function hooks are off, or Claude Code is older than 2.1.274. Check `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` and `claude --version`. |
+| `fallback to built-in summary (no Jev key: …)` | No key was found in any of the five sources above. |
+| `fallback to built-in summary (… requires a valid credit card …)` | The Vercel team has no verified card; AI Gateway refuses requests until one is added. |
+| `fallback to built-in summary (below 25% minimum: …)` | Working as intended: too little to remove. Lower `minReductionRatio` to allow smaller wins. |
+| Edits to the clone have no effect | The installed copy lives in `~/.claude/plugins/cache/`; refresh it with the marketplace update and reinstall above. |
 
 ## What and why
 
