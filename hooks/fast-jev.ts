@@ -9,7 +9,12 @@ import type {
 } from 'claude-code';
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
-import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
+import {
+  buildJevRequest,
+  DEFAULT_MODEL,
+  parseJevResponse,
+  type JevProvider,
+} from '../src/request.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -42,6 +47,8 @@ export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetch
 
 export type HookConfig = CompactOptions & {
   apiKey?: string;
+  /** Which endpoint `apiKey` belongs to; resolved with the key. */
+  provider?: JevProvider;
   compactAtPercent: number;
   minReductionRatio: number;
   model: string;
@@ -88,10 +95,15 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
 }
 
 /** A `JevAsker` over the engine's `$.http.fetch`. */
-export function jevAsker(fetchFn: HookFetch, apiKey: string, model: string): JevAsker {
+export function jevAsker(
+  fetchFn: HookFetch,
+  apiKey: string,
+  model: string,
+  provider: JevProvider = 'typesafe',
+): JevAsker {
   return {
     async ask(state, questions) {
-      const request = buildJevRequest({ apiKey, model }, state, questions);
+      const request = buildJevRequest({ apiKey, model, provider }, state, questions);
       const response = await fetchFn(request.url, {
         method: request.method,
         headers: request.headers,
@@ -167,8 +179,14 @@ export async function compactSession(
   config: HookConfig,
   fetchFn: HookFetch,
 ): Promise<SessionCompaction> {
-  if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
-  const result = await compact(messages, jevAsker(fetchFn, config.apiKey, config.model), config);
+  if (!config.apiKey) {
+    throw new Error('no Jev key: set TYPESAFE_API_KEY or AI_GATEWAY_API_KEY (env, settings env, or key file)');
+  }
+  const result = await compact(
+    messages,
+    jevAsker(fetchFn, config.apiKey, config.model, config.provider ?? 'typesafe'),
+    config,
+  );
   return { result, messages: toSessionMessages(messages, result.messages) };
 }
 
@@ -224,22 +242,56 @@ export function decisionLogLines(
   );
 }
 
-async function getApiKey(
-  $: {
-    env: { get: (name: string) => Promise<string | undefined> };
-    settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
-  },
-  config: HookConfig,
-): Promise<string | undefined> {
-  if (config.apiKey) return config.apiKey;
-  const fromEnv = await $.env.get('TYPESAFE_API_KEY');
-  if (fromEnv) return fromEnv;
-  const settings = await $.settings.read();
+type HookEngine = {
+  env: { get: (name: string) => Promise<string | undefined> };
+  settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
+  fs: { read: (path: string) => Promise<string> };
+};
+
+const TYPESAFE_KEY_FILE = '.config/typesafe/key';
+const GATEWAY_KEY_FILE = '.config/jev-gateway/key';
+
+function settingsEnv(settings: Readonly<Record<string, unknown>>, name: string): string | undefined {
   const env = settings['env'];
   if (env && typeof env === 'object') {
-    const value = (env as Record<string, unknown>)['TYPESAFE_API_KEY'];
+    const value = (env as Record<string, unknown>)[name];
     if (typeof value === 'string' && value) return value;
   }
+  return undefined;
+}
+
+async function keyFile($: HookEngine, home: string | undefined, relative: string): Promise<string | undefined> {
+  if (!home) return undefined;
+  try {
+    const text = await $.fs.read(`${home}/${relative}`);
+    const trimmed = text.trim();
+    return trimmed || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Finds a key and which endpoint it belongs to. TypeSafe direct wins when both
+ * exist. Order per provider: plugin option, process env, settings `env`, key file.
+ */
+async function resolveCredentials(
+  $: HookEngine,
+  config: HookConfig,
+): Promise<{ apiKey: string; provider: JevProvider } | undefined> {
+  if (config.apiKey) return { apiKey: config.apiKey, provider: config.provider ?? 'typesafe' };
+  const settings = await $.settings.read();
+  const home = await $.env.get('HOME');
+  const typesafe =
+    (await $.env.get('TYPESAFE_API_KEY')) ??
+    settingsEnv(settings, 'TYPESAFE_API_KEY') ??
+    (await keyFile($, home, TYPESAFE_KEY_FILE));
+  if (typesafe) return { apiKey: typesafe, provider: 'typesafe' };
+  const gateway =
+    (await $.env.get('AI_GATEWAY_API_KEY')) ??
+    settingsEnv(settings, 'AI_GATEWAY_API_KEY') ??
+    (await keyFile($, home, GATEWAY_KEY_FILE));
+  if (gateway) return { apiKey: gateway, provider: 'gateway' };
   return undefined;
 }
 
@@ -262,7 +314,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('session.compact', async ($, event, next) => {
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const config: HookConfig = { ...configured, ...(await resolveCredentials($, configured)) };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };

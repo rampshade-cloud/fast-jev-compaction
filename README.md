@@ -5,6 +5,40 @@ every tool call and result is scored in one fast request, stale ones are
 dropped or truncated, everything kept stays verbatim. Also usable as an npm
 library.
 
+> **This is a fork** of [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction).
+> The only change is the section below: Jev can be reached through Vercel AI
+> Gateway, so the plugin works without an invite-only TypeSafe account.
+> Everything else is upstream's.
+
+
+## Vercel AI Gateway (this fork)
+
+This fork can reach Jev through [Vercel AI Gateway](https://vercel.com/changelog/typesafe-ai-jev-now-available-on-ai-gateway)
+instead of a TypeSafe key, for people without TypeSafe console access.
+
+Key lookup order (first hit wins): plugin `apiKey` option, `TYPESAFE_API_KEY` (env or
+settings `env`), `~/.config/typesafe/key`, `AI_GATEWAY_API_KEY` (env or settings `env`),
+`~/.config/jev-gateway/key`. A gateway key sends requests to
+`https://ai-gateway.vercel.sh/v4/ai/evaluation-model` with model `typesafe-ai/jev`
+(`jev-latest` and other bare names are mapped onto `typesafe-ai/<name>`); the wire format
+is translated (`noul` ↔ `boolean`) so the library is unchanged.
+
+Install from a local checkout:
+
+```sh
+claude plugin marketplace add /path/to/fast-jev-compaction
+claude plugin install fast-jev-compaction@fast-jev-compaction
+```
+
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` must be set (settings `env` works) and
+Claude Code must be 2.1.274 or newer, as upstream requires.
+
+Verified on Claude Code 2.1.276 against a live session: a manual `/compact` of a
+24-message transcript sent one request to the gateway (735 ms) and the hook
+answered `session.compact` with 14 messages, an 88% character reduction, with no
+built-in summary generated. Unit tests for the gateway request and response
+translation are in `tests/gateway.test.ts` and use no network.
+
 ## What and why
 
 Most context compaction asks an LLM to summarize old turns. A summary is
