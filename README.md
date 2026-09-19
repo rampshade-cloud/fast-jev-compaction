@@ -172,6 +172,13 @@ At that point this fork has no behavioural difference from upstream, so
 [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction)
 can be installed instead.
 
+### 計測ツール / Measuring what compaction keeps
+
+`tools/` holds the scripts used to compare this fork's Jev pruning against
+Claude Code's built-in summary on real transcripts, plus the aggregate stats
+behind the numbers quoted there. They are development tools and never run
+during a session. See [tools/README.md](tools/README.md).
+
 ### Troubleshooting
 
 | Symptom | Cause |
